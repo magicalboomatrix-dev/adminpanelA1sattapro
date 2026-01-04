@@ -26,51 +26,25 @@ export default function ManageChart() {
 
   const getDaysInMonth = (y, m) => new Date(y, m, 0).getDate();
 
- useEffect(() => {
-  let mounted = true;
+  // ---------------- FETCH GAMES ----------------
+  useEffect(() => {
+    let mounted = true;
+    const fetchGames = async () => {
+      setLoadingGames(true);
+      try {
+        const res = await api.get("/games");
+        if (mounted) setGames(Array.isArray(res.data) ? res.data : []);
+      } catch {
+        toast.error("Failed to fetch games");
+      } finally {
+        if (mounted) setLoadingGames(false);
+      }
+    };
+    fetchGames();
+    return () => (mounted = false);
+  }, []);
 
-  const toDate = (time) => new Date(`1970-01-01T${time}`);
-
-  const to12Hour = (time) => {
-    const [hour, minute] = time.split(":").map(Number);
-    const ampm = hour >= 12 ? "PM" : "AM";
-    const hr = hour % 12 || 12;
-    return `${hr}:${minute.toString().padStart(2, "0")} ${ampm}`;
-  };
-
-  const fetchGames = async () => {
-    setLoadingGames(true);
-    try {
-      const res = await api.get("/games");
-      if (!mounted) return;
-
-      // Ensure array
-      const list = Array.isArray(res.data) ? [...res.data] : [];
-
-      // Sort by time
-      list.sort((a, b) => toDate(a.resultTime) - toDate(b.resultTime));
-
-      // Add 12-hr formatted time
-      const result = list.map((g) => ({
-        ...g,
-        resultTime12: g.resultTime ? to12Hour(g.resultTime) : "",
-      }));
-
-      setGames(result);
-    } catch (err) {
-      console.error(err);
-      toast.error("Failed to fetch games");
-      setGames([]);
-    } finally {
-      if (mounted) setLoadingGames(false);
-    }
-  };
-
-  fetchGames();
-  return () => (mounted = false);
-}, []);
-
-
+  // ---------------- FETCH CHART ----------------
   useEffect(() => {
     if (!selectedGame) {
       setChartData([]);
@@ -89,17 +63,19 @@ export default function ManageChart() {
         setResultTime(game?.resultTime || "");
 
         const days = getDaysInMonth(year, month);
-        const data = Array.from({ length: days }, () => ({ value: "" }));
+        const data = Array.from({ length: days }, () => ({
+          value: "",
+          declaredAt: null,
+        }));
 
         if (res.data?.numbers) {
           res.data.numbers.forEach((n, i) => {
-            if (i < days) data[i] = n || { value: "" };
+            if (i < days) data[i] = n || data[i];
           });
         }
 
         setChartData(data);
-      } catch (err) {
-        console.error(err);
+      } catch {
         toast.error("Failed to load chart");
       } finally {
         setLoadingChart(false);
@@ -109,10 +85,10 @@ export default function ManageChart() {
     fetchChart();
   }, [selectedGame, year, month, games]);
 
+  // ---------------- SAVE DAY ----------------
   const handleSaveDay = async (index, valueObj) => {
-    if (!selectedGame) return;
-    if (valueObj.value !== "" && !/^\d{1,2}$/.test(String(valueObj.value))) {
-      toast.error("Only 1-2 digit numbers allowed");
+    if (!/^\d{1,2}$/.test(valueObj.value || "")) {
+      toast.error("Only 1–2 digit numbers allowed");
       return;
     }
 
@@ -124,26 +100,104 @@ export default function ManageChart() {
         day: index + 1,
         value: valueObj.value,
       });
-      toast.success("Saved");
 
-      setEditingIndex(null);
       const updated = [...chartData];
-      updated[index] = { value: valueObj.value };
+      updated[index] = {
+        value: valueObj.value,
+        declaredAt: new Date().toISOString(),
+      };
       setChartData(updated);
-    } catch (err) {
-      console.error(err);
-      toast.error("Failed to update day");
+      setEditingIndex(null);
+      toast.success("Saved");
+    } catch {
+      toast.error("Failed to save");
     } finally {
       setSavingDay(false);
     }
   };
 
+  // ---------------- DELETE DAY ----------------
+  const handleDeleteDay = async (index) => {
+    if (!window.confirm(`Clear day ${index + 1}?`)) return;
+
+    try {
+      await api.delete(`/charts/${selectedGame}/day`, {
+        data: { year, month, day: index + 1 },
+      });
+      const updated = [...chartData];
+      updated[index] = { value: "", declaredAt: null };
+      setChartData(updated);
+      toast.success("Day cleared");
+    } catch {
+      toast.error("Failed to clear day");
+    }
+  };
+
+  // ---------------- DELETE CHART ----------------
+  const handleDeleteChart = async () => {
+    if (!window.confirm("Delete entire chart?")) return;
+    try {
+      await api.delete(`/charts/${selectedGame}`, {
+        params: { year, month },
+      });
+      setChartData(
+        Array.from({ length: getDaysInMonth(year, month) }, () => ({
+          value: "",
+          declaredAt: null,
+        }))
+      );
+      toast.success("Chart deleted");
+    } catch {
+      toast.error("Failed to delete chart");
+    }
+  };
+
+  // ---------------- EXCEL UPLOAD ----------------
+  const handleExcelUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      setFileLoading(true);
+      const formData = new FormData();
+      formData.append("excelFile", file);
+
+      await api.post(`/chart/upload/${selectedGame}/${year}`, formData);
+      toast.success("Excel imported");
+
+      const res = await api.get(`/charts/${selectedGame}`, {
+        params: { year, month },
+      });
+
+      const days = getDaysInMonth(year, month);
+      const updated = Array.from({ length: days }, () => ({
+        value: "",
+        declaredAt: null,
+      }));
+
+      if (res.data?.numbers) {
+        res.data.numbers.forEach((n, i) => {
+          if (i < days) updated[i] = n || updated[i];
+        });
+      }
+
+      setChartData(updated);
+    } catch {
+      toast.error("Excel upload failed");
+    } finally {
+      setFileLoading(false);
+      e.target.value = "";
+    }
+  };
+
+  // ---------------- MONTH NAV ----------------
   const prevMonth = () => {
     if (month === 1) {
       setYear((y) => y - 1);
       setMonth(12);
     } else setMonth((m) => m - 1);
   };
+
   const nextMonth = () => {
     if (month === 12) {
       setYear((y) => y + 1);
@@ -152,143 +206,128 @@ export default function ManageChart() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-indigo-50/40 to-white py-4 sm:py-6 px-3 sm:px-6 lg:px-8">
-      <div className="max-w-7xl mx-auto"> {/* widened from 6xl to 7xl to remove right blank space */}
-        <header className="mb-4 sm:mb-6">
-          <h1 className="text-indigo-900 font-extrabold text-xl sm:text-2xl lg:text-3xl">
-            Manage Monthly Chart
-          </h1>
-        </header>
+    <div className="min-h-screen bg-gradient-to-b from-indigo-50/40 to-white py-6 px-4">
+      <div className="max-w-7xl mx-auto">
+        <h1 className="text-3xl font-extrabold text-indigo-900 mb-6">
+          Manage Monthly Chart
+        </h1>
 
-        <section className="bg-white border border-indigo-100 rounded-xl sm:rounded-2xl p-3 sm:p-4 lg:p-6 mb-4 sm:mb-6 shadow-sm">
-          <div className="grid grid-cols-1 gap-3 sm:gap-4 lg:grid-cols-12 items-end">
-            <div className="lg:col-span-5">
-              <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-1">
-                Select Game
-              </label>
-              <select
-                className="w-full rounded-lg border px-3 py-2 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
-                value={selectedGame}
-                onChange={(e) => setSelectedGame(e.target.value)}
-              >
-                <option value="">{loadingGames ? "Loading games..." : "Select Game"}</option>
-                {games.map((g) => (
-                  <option key={g._id} value={g._id}>
-                  {g.name} {g.resultTime12 ? `— ${g.resultTime12}` : ""}
-                  </option>
+        {/* CONTROLS */}
+        <div className="bg-white p-6 rounded-2xl shadow mb-6 grid lg:grid-cols-12 gap-4 items-end">
+          <div className="lg:col-span-5">
+            <label className="text-sm font-medium">Select Game</label>
+            <select
+              className="w-full mt-1 rounded border px-3 py-2"
+              value={selectedGame}
+              onChange={(e) => setSelectedGame(e.target.value)}
+            >
+              <option value="">
+                {loadingGames ? "Loading..." : "Select game"}
+              </option>
+              {games.map((g) => (
+                <option key={g._id} value={g._id}>
+                  {g.name} — {g.resultTime}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="lg:col-span-4 flex justify-center items-center gap-2">
+            <button onClick={prevMonth} className="p-2 bg-indigo-100 rounded">
+              <ChevronLeft />
+            </button>
+            <div className="font-semibold">
+              {month}/{year}
+            </div>
+            <button onClick={nextMonth} className="p-2 bg-indigo-100 rounded">
+              <ChevronRight />
+            </button>
+          </div>
+
+          <div className="lg:col-span-3 flex gap-2 justify-end">
+            <label
+              className={`px-3 py-2 rounded-lg text-white cursor-pointer ${
+                fileLoading || !selectedGame
+                  ? "bg-gray-400"
+                  : "bg-emerald-600 hover:bg-emerald-700"
+              }`}
+            >
+              <UploadCloud className="inline w-4 h-4 mr-1" />
+              {fileLoading ? "Uploading..." : "Import Excel"}
+              <input
+                type="file"
+                className="hidden"
+                accept=".xlsx,.xls"
+                onChange={handleExcelUpload}
+                disabled={!selectedGame}
+              />
+            </label>
+
+            <button
+              onClick={handleDeleteChart}
+              className="px-3 py-2 rounded-lg bg-red-50 text-red-600"
+            >
+              Delete Chart
+            </button>
+          </div>
+        </div>
+
+        {/* TABLE */}
+        <div className="bg-white rounded-2xl shadow overflow-hidden">
+          {loadingChart ? (
+            <div className="p-6 text-center text-indigo-600">
+              <Loader2 className="animate-spin inline mr-2" /> Loading...
+            </div>
+          ) : (
+            <table className="w-full">
+              <thead className="bg-indigo-50 text-sm">
+                <tr>
+                  <th className="p-3 text-left">Day</th>
+                  <th className="p-3 text-left">Number</th>
+                  <th className="p-3 text-center">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {chartData.map((d, i) => (
+                  <tr key={i} className="border-t hover:bg-indigo-50">
+                    <td className="p-3">{i + 1}</td>
+                    <td className="p-3">
+                      {editingIndex === i ? (
+                        <input
+                          className="border rounded px-2 py-1 w-16 text-center"
+                          value={d.value}
+                          onChange={(e) => {
+                            if (/^\d{0,2}$/.test(e.target.value)) {
+                              const updated = [...chartData];
+                              updated[i].value = e.target.value;
+                              setChartData(updated);
+                            }
+                          }}
+                          onKeyDown={(e) =>
+                            e.key === "Enter" &&
+                            handleSaveDay(i, chartData[i])
+                          }
+                        />
+                      ) : (
+                        <span
+                          className="font-semibold cursor-pointer"
+                          onClick={() => setEditingIndex(i)}
+                        >
+                          {d.value || "-"}
+                        </span>
+                      )}
+                    </td>
+                    <td className="p-3 text-center">
+                      <button onClick={() => handleDeleteDay(i)}>
+                        <Trash2 className="w-4 h-4 text-red-600" />
+                      </button>
+                    </td>
+                  </tr>
                 ))}
-              </select>
-            </div>
-
-            <div className="lg:col-span-4 flex items-center justify-center gap-2">
-              <button
-                onClick={prevMonth}
-                className="rounded-lg p-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700"
-              >
-                <ChevronLeft className="w-4 h-4" />
-              </button>
-              <div className="text-xs sm:text-sm font-medium text-center">
-                <span className="text-gray-600 text-xs block">Month</span>
-                <div className="font-semibold text-indigo-800">{month}/{year}</div>
-              </div>
-              <button
-                onClick={nextMonth}
-                className="rounded-lg p-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700"
-              >
-                <ChevronRight className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="lg:col-span-3 flex flex-col sm:flex-row gap-2 justify-end">
-              <label className={`inline-flex items-center justify-center gap-1 px-3 py-2 rounded-lg text-white text-xs sm:text-sm cursor-pointer transition-colors ${fileLoading || !selectedGame ? "bg-gray-400" : "bg-emerald-600 hover:bg-emerald-700"}`}>
-                <UploadCloud className="w-4 h-4" />
-                <span>{fileLoading ? "Uploading..." : "Import Excel"}</span>
-                <input type="file" accept=".xlsx,.xls" className="hidden" disabled={fileLoading || !selectedGame} />
-              </label>
-            </div>
-          </div>
-
-          <div className="mt-2 text-xs text-gray-600">
-            {selectedGame && resultTime && <span><strong className="text-indigo-800">Result Time:</strong> {resultTime}</span>}
-          </div>
-        </section>
-
-        <section>
-          <div className="bg-white border border-indigo-100 rounded-xl sm:rounded-2xl shadow-sm overflow-hidden">
-            {loadingChart ? (
-              <div className="p-6 flex items-center justify-center text-indigo-500">
-                <Loader2 className="animate-spin w-5 h-5 mr-2" />
-                Loading chart...
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-100">
-                  <thead className="bg-indigo-50">
-                    <tr>
-                      <th className="px-3 py-2 text-left text-xs font-semibold text-gray-700 uppercase">Day</th>
-                      <th className="px-3 py-2 text-left text-xs font-semibold text-gray-700 uppercase">Number</th>
-                    </tr>
-                  </thead>
-
-                  <tbody className="divide-y divide-gray-100">
-                    {chartData.map((numObj, idx) => (
-                      <tr key={idx} className="hover:bg-indigo-50">
-                        <td className="px-3 py-2 text-xs sm:text-sm font-medium text-gray-800">{idx + 1}</td>
-
-                        <td className="px-3 py-2">
-                          {editingIndex === idx ? (
-                            <div className="flex gap-1 items-center">
-                              <input
-                                autoFocus
-                                className="w-16 rounded border px-2 py-1 text-center text-sm focus:ring-1 focus:ring-indigo-300"
-                                value={numObj.value ?? ""}
-                                onChange={(e) => {
-                                  const v = e.target.value;
-                                  if (/^\d{0,2}$/.test(v)) {
-                                    const updated = [...chartData];
-                                    updated[idx] = { ...updated[idx], value: v };
-                                    setChartData(updated);
-                                  }
-                                }}
-                                onKeyDown={(e) => {
-                                  if (e.key === "Enter") handleSaveDay(idx, chartData[idx]);
-                                  else if (e.key === "Escape") setEditingIndex(null);
-                                }}
-                              />
-                              <button
-                                onClick={() => handleSaveDay(idx, chartData[idx])}
-                                className="p-1 rounded bg-indigo-600 text-white hover:bg-indigo-700"
-                              >
-                                {savingDay ? <Loader2 className="animate-spin w-4 h-4" /> : <Save className="w-4 h-4" />}
-                              </button>
-                              <button
-                                onClick={() => setEditingIndex(null)}
-                                className="p-1 rounded bg-gray-100 hover:bg-gray-200"
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          ) : (
-                            <div className="flex items-center gap-3"> {/* aligned and spaced */}
-                              <span className={`font-semibold text-sm ${numObj.value ? "text-emerald-700" : "text-gray-400"}`}>
-                                {numObj.value || "-"}
-                              </span>
-                              <button
-                                onClick={() => setEditingIndex(idx)}
-                                className="p-2 rounded-lg bg-indigo-100 hover:bg-indigo-200 text-indigo-700" /* Bigger button */>
-                                <Edit2 className="w-5 h-5" /> {/* Bigger icon */}
-                              </button>
-                            </div>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        </section>
+              </tbody>
+            </table>
+          )}
+        </div>
       </div>
     </div>
   );
